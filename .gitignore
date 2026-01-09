@@ -2,8 +2,10 @@
 .idea/
 .DS_Store
 Thumbs.db
-fileripper.exe
+*.exe
 *.log
 dump/
 winscp_log.xml
 winscp_dump
+*.zip
+main

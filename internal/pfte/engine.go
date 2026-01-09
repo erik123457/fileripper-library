@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
 	"fileripper/internal/network"
 )
 
@@ -36,7 +35,10 @@ func NewEngine() *Engine {
 	}
 }
 
-func (e *Engine) StartTransfer(session *network.SftpSession, downloadAll bool) error {
+// StartTransfer is now bidirectional.
+// mode: "DOWNLOAD" (default) or "UPLOAD"
+// targetPath: The local folder to upload (if mode is UPLOAD)
+func (e *Engine) StartTransfer(session *network.SftpSession, operation string, targetPath string) error {
 	if session.SftpClient == nil {
 		return fmt.Errorf("sftp_client_not_initialized")
 	}
@@ -45,45 +47,78 @@ func (e *Engine) StartTransfer(session *network.SftpSession, downloadAll bool) e
 	if e.Mode == ModeBoost {
 		concurrency = BatchSizeBoost
 	}
-	
-	if !downloadAll {
-		return nil
-	}
-
-	localDir := "dump"
-	if _, err := os.Stat(localDir); os.IsNotExist(err) {
-		os.Mkdir(localDir, 0755)
-	}
-
-	fmt.Println(">> PFTE: Scanning remote root...")
-	
-	files, err := session.SftpClient.ReadDir(".")
-	if err != nil {
-		return err
-	}
 
 	queuedCount := int64(0)
 	totalBytes := int64(0)
 
-	for _, file := range files {
-		if file.IsDir() {
-			continue
+	// --- UPLOAD LOGIC ---
+	if operation == "UPLOAD" {
+		fmt.Printf(">> PFTE: Scanning local directory '%s' for mass upload...\n", targetPath)
+		
+		err := filepath.Walk(targetPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				// We create remote directories on the fly or let sftp handle it?
+				// For v0.2, let's assume flat structure or pre-existing dirs.
+				// Better: Just skip dir entries, file creation handles structure if we implement mkdir (later).
+				return nil 
+			}
+
+			// Calculate remote path relative to the target folder
+			// e.g. local: main/src/code.go -> remote: ./main/src/code.go
+			// For simplicity in this version, we upload to remote root retaining the filename.
+			// Or better: upload to a folder named as the source.
+			
+			// Simple Logic: Local "main/file.txt" -> Remote "./file.txt" (Flattening for now for safety)
+			// TODO: Implement recursive directory creation on remote.
+			remotePath := info.Name() 
+
+			e.Queue.Add(&TransferJob{
+				LocalPath:  path,
+				RemotePath: remotePath,
+				Operation:  "UPLOAD",
+			})
+			
+			queuedCount++
+			totalBytes += info.Size()
+			return nil
+		})
+
+		if err != nil {
+			return err
 		}
 
-		remotePath := file.Name()
-		localPath := filepath.Join(localDir, file.Name())
-
-		e.Queue.Add(&TransferJob{
-			LocalPath:  localPath,
-			RemotePath: remotePath,
-			Operation:  "DOWNLOAD",
-		})
+	// --- DOWNLOAD LOGIC ---
+	} else {
+		// Default to scanning remote root
+		localDir := "dump"
+		if _, err := os.Stat(localDir); os.IsNotExist(err) {
+			os.Mkdir(localDir, 0755)
+		}
 		
-		queuedCount++
-		totalBytes += file.Size()
+		fmt.Println(">> PFTE: Scanning remote root for download...")
+		files, err := session.SftpClient.ReadDir(".")
+		if err != nil {
+			return err
+		}
+
+		for _, file := range files {
+			if file.IsDir() { continue }
+			
+			localPath := filepath.Join(localDir, file.Name())
+			e.Queue.Add(&TransferJob{
+				LocalPath:  localPath,
+				RemotePath: file.Name(),
+				Operation:  "DOWNLOAD",
+			})
+			queuedCount++
+			totalBytes += file.Size()
+		}
 	}
 
-	fmt.Printf(">> PFTE: Queue filled. Files: %d, Total Size: %d bytes.\n", queuedCount, totalBytes)
+	fmt.Printf(">> PFTE: Job ready. Files: %d, Total Size: %d bytes.\n", queuedCount, totalBytes)
 	
 	GlobalMonitor.Reset(queuedCount, totalBytes)
 
@@ -91,8 +126,7 @@ func (e *Engine) StartTransfer(session *network.SftpSession, downloadAll bool) e
 		return nil
 	}
 
-	// This call was failing because plr.go had errors. 
-	// Now it should work.
+	// Launch the swarm
 	workerPool := NewWorkerPool(concurrency, e.Queue)
 	workerPool.StartUnleash(session)
 
