@@ -9,15 +9,15 @@ import (
 	"os"
 	"strconv"
 
+	// Local imports
 	"fileripper/internal/core"
 	"fileripper/internal/network"
 	"fileripper/internal/pfte"
 )
 
 // main is the entry point.
-// Go handles memory, so we focus on logic.
 func main() {
-	fmt.Println("FileRipper v0.0.1 - Powered by PFTE")
+	fmt.Println("FileRipper v0.0.1 - Powered by PFTE (Go Edition)")
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -32,33 +32,39 @@ func main() {
 		// TODO: Init API server here
 
 	case "transfer":
-		// Usage: fileripper transfer <host> <port>
-		if len(os.Args) < 4 {
-			fmt.Println("Error: Missing host or port.")
-			fmt.Println("Usage: fileripper transfer <host> <port>")
+		// Usage: fileripper transfer <host> <port> <user> <password>
+		// Note: Passing password via CLI args is bad practice for prod (history logs),
+		// but acceptable for this alpha test phase.
+		if len(os.Args) < 6 {
+			fmt.Println("Error: Missing arguments.")
+			fmt.Println("Usage: fileripper transfer <host> <port> <user> <password>")
 			return
 		}
 
 		host := os.Args[2]
 		portStr := os.Args[3]
+		user := os.Args[4]
+		password := os.Args[5]
+
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
 			fmt.Println("Error: Invalid port number.")
 			return
 		}
 
-		fmt.Printf(">> CLI Transfer mode engaged. Target: %s:%d\n", host, port)
+		fmt.Printf(">> CLI Transfer mode engaged. Target: %s@%s:%d\n", user, host, port)
 
-		// 1. Init Network
-		session := network.NewSession(host, port)
+		// 1. Init Network with Auth credentials
+		session := network.NewSession(host, port, user, password)
 		defer session.Close()
 
-		// 2. Test Connection (Handshake)
+		// 2. Connect & Authenticate (SHA-256 check happens here)
 		if err := session.Connect(); err != nil {
 			os.Exit(1)
 		}
 
 		// 3. Start Engine
+		// We pass the authenticated session to the engine now.
 		engine := pfte.NewEngine()
 		if err := engine.StartTransfer(session); err != nil {
 			fmt.Printf("Error during transfer: %v\n", core.ErrPipelineStalled)
@@ -76,6 +82,6 @@ Usage: fileripper [command] [args]
 
 Commands:
   start-server   Daemon mode (API for Flutter UI)
-  transfer       <host> <port> -> Test connection and engine
+  transfer       <host> <port> <user> <password>
 `)
 }

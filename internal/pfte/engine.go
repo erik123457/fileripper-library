@@ -45,6 +45,12 @@ func (e *Engine) StartTransfer(session *network.SftpSession) error {
 
 	fmt.Printf(">> PFTE Engine started in %s mode.\n", modeName)
 	fmt.Printf(">> Strategy: Launching %d concurrent workers (Goroutines).\n", batchSize)
+	
+	// Verification that we received a valid, open SSH client
+	if session.Client == nil {
+		fmt.Println(">> PFTE Error: Session client is nil. Did auth fail?")
+		return fmt.Errorf("invalid_session")
+	}
 
 	return nil
 }
