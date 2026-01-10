@@ -29,12 +29,10 @@ func NewWorkerPool(concurrency int, queue *JobQueue) *WorkerPool {
 
 // StartUnleash fires up the goroutines to consume the queue.
 func (wp *WorkerPool) StartUnleash(session *network.SftpSession) {
-	// Uses fmt (Fixes import error)
 	fmt.Printf(">> PLR: Unleashing %d workers...\n", wp.Concurrency)
 	
 	GlobalMonitor.SetRunning(true)
 	
-	// Uses time (Fixes import error)
 	start := time.Now()
 
 	for i := 0; i < wp.Concurrency; i++ {

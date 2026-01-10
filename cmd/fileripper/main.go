@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	fmt.Println("FileRipper v0.2.0 - Powered by PFTE (Go Edition)")
+	fmt.Println("FileRipper v0.3.0 - Powered by PFTE Engine")
 
 	if len(os.Args) < 2 {
 		printUsage()

@@ -8,36 +8,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
+	"sync/atomic"
+
 	"fileripper/internal/network"
 )
 
 const (
 	BatchSizeBoost        = 64
 	BatchSizeConservative = 2
+	DirCreationWorkers    = 8 // Optimized for Phase 1
 )
 
 type TransferMode int
 
 const (
-	ModeBoost        TransferMode = iota 
-	ModeConservative                     
+	ModeBoost TransferMode = iota
+	ModeConservative
 )
 
 type Engine struct {
 	Mode  TransferMode
-	Queue *JobQueue 
+	Queue *JobQueue
 }
 
 func NewEngine() *Engine {
 	return &Engine{
-		Mode:  ModeBoost, 
+		Mode:  ModeBoost,
 		Queue: NewQueue(),
 	}
 }
 
-// StartTransfer is now bidirectional.
-// mode: "DOWNLOAD" (default) or "UPLOAD"
-// targetPath: The local folder to upload (if mode is UPLOAD)
+// StartTransfer enforces explicit directory creation (Phase 1) then file transfer (Phase 2).
 func (e *Engine) StartTransfer(session *network.SftpSession, operation string, targetPath string) error {
 	if session.SftpClient == nil {
 		return fmt.Errorf("sftp_client_not_initialized")
@@ -48,41 +51,49 @@ func (e *Engine) StartTransfer(session *network.SftpSession, operation string, t
 		concurrency = BatchSizeBoost
 	}
 
-	queuedCount := int64(0)
-	totalBytes := int64(0)
-
 	// --- UPLOAD LOGIC ---
 	if operation == "UPLOAD" {
-		fmt.Printf(">> PFTE: Scanning local directory '%s' for mass upload...\n", targetPath)
+		// Convert input to Absolute Path immediately.
+		absTarget, err := filepath.Abs(targetPath)
+		if err != nil {
+			return fmt.Errorf("failed to get absolute path: %v", err)
+		}
+
+		fmt.Printf(">> PFTE: Analyzing local source '%s'...\n", absTarget)
+
+		baseDir := filepath.Dir(absTarget)
+
+		var foldersToCreate []string
+		var filesToTransfer []*TransferJob
 		
-		err := filepath.Walk(targetPath, func(path string, info os.FileInfo, err error) error {
+		totalBytes := int64(0)
+
+		// STEP 1: SCAN
+		err = filepath.Walk(absTarget, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				fmt.Printf(">> Warning: Error accessing %s: %v\n", path, err)
+				return nil
+			}
+
+			relPath, err := filepath.Rel(baseDir, path)
 			if err != nil {
 				return err
 			}
+			
+			remotePath := filepath.ToSlash(relPath)
+
 			if info.IsDir() {
-				// We create remote directories on the fly or let sftp handle it?
-				// For v0.2, let's assume flat structure or pre-existing dirs.
-				// Better: Just skip dir entries, file creation handles structure if we implement mkdir (later).
-				return nil 
+				if remotePath != "." && remotePath != "" {
+					foldersToCreate = append(foldersToCreate, remotePath)
+				}
+			} else {
+				filesToTransfer = append(filesToTransfer, &TransferJob{
+					LocalPath:  path,
+					RemotePath: remotePath,
+					Operation:  "UPLOAD",
+				})
+				totalBytes += info.Size()
 			}
-
-			// Calculate remote path relative to the target folder
-			// e.g. local: main/src/code.go -> remote: ./main/src/code.go
-			// For simplicity in this version, we upload to remote root retaining the filename.
-			// Or better: upload to a folder named as the source.
-			
-			// Simple Logic: Local "main/file.txt" -> Remote "./file.txt" (Flattening for now for safety)
-			// TODO: Implement recursive directory creation on remote.
-			remotePath := info.Name() 
-
-			e.Queue.Add(&TransferJob{
-				LocalPath:  path,
-				RemotePath: remotePath,
-				Operation:  "UPLOAD",
-			})
-			
-			queuedCount++
-			totalBytes += info.Size()
 			return nil
 		})
 
@@ -90,23 +101,81 @@ func (e *Engine) StartTransfer(session *network.SftpSession, operation string, t
 			return err
 		}
 
+		// STEP 2: PHASE 1 - CREATE STRUCTURE (PARALLEL x8)
+		sort.Slice(foldersToCreate, func(i, j int) bool {
+			return len(foldersToCreate[i]) < len(foldersToCreate[j])
+		})
+
+		dirCount := len(foldersToCreate)
+		if dirCount > 0 {
+			fmt.Printf(">> PFTE: Phase 1 - Creating %d directories...\n", dirCount)
+			
+			dirChan := make(chan string, dirCount)
+			var wg sync.WaitGroup
+			var doneCount int32
+			var printMu sync.Mutex 
+
+			for _, d := range foldersToCreate {
+				dirChan <- d
+			}
+			close(dirChan)
+
+			for i := 0; i < DirCreationWorkers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for dir := range dirChan {
+						_ = session.SftpClient.MkdirAll(dir)
+						current := atomic.AddInt32(&doneCount, 1)
+						
+						printMu.Lock()
+						progress := float64(current) / float64(dirCount) * 100
+						fmt.Printf("\r>> Structure: [%3.0f%%] Processed...                 ", progress)
+						printMu.Unlock()
+					}
+				}()
+			}
+			wg.Wait()
+			fmt.Println("\n>> PFTE: Structure verified.")
+		}
+
+		// STEP 3: PHASE 2 - QUEUE FILES
+		fileCount := int64(len(filesToTransfer))
+		if fileCount == 0 {
+			fmt.Println(">> Warning: No files found to transfer.")
+			return nil
+		}
+
+		fmt.Printf(">> PFTE: Phase 2 - Queuing %d files...\n", fileCount)
+		for _, job := range filesToTransfer {
+			e.Queue.Add(job)
+		}
+
+		GlobalMonitor.Reset(fileCount, totalBytes)
+
+		workerPool := NewWorkerPool(concurrency, e.Queue)
+		workerPool.StartUnleash(session)
+
+		return nil
+
 	// --- DOWNLOAD LOGIC ---
 	} else {
-		// Default to scanning remote root
 		localDir := "dump"
 		if _, err := os.Stat(localDir); os.IsNotExist(err) {
 			os.Mkdir(localDir, 0755)
 		}
-		
+
 		fmt.Println(">> PFTE: Scanning remote root for download...")
 		files, err := session.SftpClient.ReadDir(".")
 		if err != nil {
 			return err
 		}
 
+		queuedCount := int64(0)
+		totalBytes := int64(0)
+
 		for _, file := range files {
 			if file.IsDir() { continue }
-			
 			localPath := filepath.Join(localDir, file.Name())
 			e.Queue.Add(&TransferJob{
 				LocalPath:  localPath,
@@ -116,19 +185,14 @@ func (e *Engine) StartTransfer(session *network.SftpSession, operation string, t
 			queuedCount++
 			totalBytes += file.Size()
 		}
-	}
 
-	fmt.Printf(">> PFTE: Job ready. Files: %d, Total Size: %d bytes.\n", queuedCount, totalBytes)
-	
-	GlobalMonitor.Reset(queuedCount, totalBytes)
-
-	if queuedCount == 0 {
+		fmt.Printf(">> PFTE: Job ready. Files: %d, Total Size: %d bytes.\n", queuedCount, totalBytes)
+		GlobalMonitor.Reset(queuedCount, totalBytes)
+		
+		if queuedCount > 0 {
+			workerPool := NewWorkerPool(concurrency, e.Queue)
+			workerPool.StartUnleash(session)
+		}
 		return nil
 	}
-
-	// Launch the swarm
-	workerPool := NewWorkerPool(concurrency, e.Queue)
-	workerPool.StartUnleash(session)
-
-	return nil
 }

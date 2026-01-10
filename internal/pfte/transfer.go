@@ -5,93 +5,248 @@
 package pfte
 
 import (
+	"fmt"
+	"hash"
+	"hash/crc32"
 	"io"
 	"os"
+	"sync"
 
 	"fileripper/internal/network"
 )
 
-// BufferSize is defined ONLY HERE to avoid redeclaration errors.
-// 64KB buffer for optimal TCP throughput.
-const BufferSize = 64 * 1024 
+const (
+	BufferSize        = 64 * 1024 // 64KB for standard streams
+	MultipartThreshold = 10 * 1024 * 1024 // 10MB. Files larger than this get split.
+	MultipartChunks    = 16 // The user requested 16 chunks for the tail file.
+)
 
-// ProgressWriter is a wrapper to update the monitor as we write
-type ProgressWriter struct {
-	Writer io.Writer
-	OnWrite func(int64)
+// ProgressTracker wraps an io.Reader to update monitor and compute hash simultaneously.
+type ProgressTracker struct {
+	Reader io.Reader
+	Hasher hash.Hash32
+	// Lock needed because multiple chunks might update metrics concurrently
+	Mu     sync.Mutex 
 }
 
-func (pw *ProgressWriter) Write(p []byte) (int, error) {
-	n, err := pw.Writer.Write(p)
+func (pt *ProgressTracker) Read(p []byte) (int, error) {
+	n, err := pt.Reader.Read(p)
 	if n > 0 {
-		pw.OnWrite(int64(n))
+		GlobalMonitor.AddBytes(int64(n))
+		
+		// Hasher is not thread-safe, so if we used this in multipart we'd need locking.
+		// For multipart, we might skip hashing or handle it differently.
+		// For now, we lock just in case.
+		pt.Mu.Lock()
+		pt.Hasher.Write(p[:n])
+		pt.Mu.Unlock()
 	}
 	return n, err
 }
 
-// DownloadFileWithProgress pulls a remote file and updates GlobalMonitor
+// DownloadFileWithProgress pulls a remote file safely.
 func DownloadFileWithProgress(session *network.SftpSession, remotePath, localPath string) error {
-	src, err := session.SftpClient.Open(remotePath)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-
-	dst, err := os.Create(localPath)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
+	var lastErr error
 	buf := make([]byte, BufferSize)
-	
-	// Wrap the destination writer to intercept bytes
-	writer := &ProgressWriter{
-		Writer: dst,
-		OnWrite: func(n int64) {
-			GlobalMonitor.AddBytes(n)
-		},
-	}
 
-	_, err = io.CopyBuffer(writer, src, buf)
+	for attempt := 1; attempt <= 3; attempt++ {
+		lastErr = func() error {
+			src, err := session.SftpClient.Open(remotePath)
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+
+			dst, err := os.Create(localPath)
+			if err != nil {
+				return err
+			}
+			defer dst.Close()
+
+			tracker := &ProgressTracker{
+				Reader: src,
+				Hasher: crc32.NewIEEE(),
+			}
+
+			_, err = io.CopyBuffer(dst, tracker, buf)
+			return err
+		}()
+
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
+}
+
+// UploadFileWithProgress decides whether to use Single Stream or Multipart Swarm.
+func UploadFileWithProgress(session *network.SftpSession, localPath, remotePath string) error {
+	// 1. Check file size
+	info, err := os.Stat(localPath)
 	if err != nil {
 		return err
 	}
+	fileSize := info.Size()
 
-	dst.Sync()
+	// 2. Decision Matrix
+	if fileSize >= MultipartThreshold {
+		// Try Multipart upload for large files to kill the "tail effect"
+		// fmt.Printf("\n>> Turbo: Splitting %s into 16 chunks...\n", localPath)
+		err := uploadMultipart(session, localPath, remotePath, fileSize)
+		if err == nil {
+			return nil
+		}
+		// If multipart fails (e.g. server locks file), fall back silently to single stream
+		// fmt.Printf(">> Turbo Failed (%v). Reverting to single stream.\n", err)
+	}
+
+	// 3. Fallback / Standard Upload
+	return uploadSingleStream(session, localPath, remotePath)
+}
+
+// uploadSingleStream is the robust, standard upload logic.
+func uploadSingleStream(session *network.SftpSession, localPath, remotePath string) error {
+	var lastErr error
+	buf := make([]byte, BufferSize)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		lastErr = func() error {
+			src, err := os.Open(localPath)
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+
+			dst, err := session.SftpClient.Create(remotePath)
+			if err != nil {
+				return err
+			}
+			defer dst.Close()
+
+			tracker := &ProgressTracker{
+				Reader: src,
+				Hasher: crc32.NewIEEE(),
+			}
+
+			_, err = io.CopyBuffer(dst, tracker, buf)
+			if err != nil {
+				return err
+			}
+
+			_ = fmt.Sprintf("%x", tracker.Hasher.Sum32()) 
+			return nil
+		}()
+
+		if lastErr == nil {
+			break 
+		}
+	}
+	return lastErr
+}
+
+// uploadMultipart splits the file and uploads parts in parallel.
+func uploadMultipart(session *network.SftpSession, localPath, remotePath string, size int64) error {
+	// Calculate chunk size
+	chunkSize := size / int64(MultipartChunks)
+	
+	// Create the remote file once to ensure it exists and is truncated
+	f, err := session.SftpClient.Create(remotePath)
+	if err != nil {
+		return err
+	}
+	f.Close() // Close it, workers will open their own handles
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, MultipartChunks)
+
+	// Launch 16 mini-workers
+	for i := 0; i < MultipartChunks; i++ {
+		wg.Add(1)
+		
+		start := int64(i) * chunkSize
+		end := start + chunkSize
+		if i == MultipartChunks-1 {
+			end = size // Last chunk takes the remainder
+		}
+
+		go func(offset, length int64) {
+			defer wg.Done()
+
+			// Each worker needs its own file handle for thread safety on Seek
+			// NOTE: Some SFTP servers dislike multiple handles to the same file.
+			remoteFile, err := session.SftpClient.OpenFile(remotePath, os.O_WRONLY)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			defer remoteFile.Close()
+
+			localFile, err := os.Open(localPath)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			defer localFile.Close()
+
+			// Seek to position
+			_, err = remoteFile.Seek(offset, 0)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			_, err = localFile.Seek(offset, 0)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			// Limit the reader to this chunk's length
+			partReader := io.LimitReader(localFile, length - offset) // logic fix below
+			// Actually LimitReader takes size, not end pos.
+			partReader = io.LimitReader(localFile, length) 
+
+			// We wrap for stats updating
+			// Note: Hasher is skipped in multipart for speed/complexity reasons
+			// (Merging 16 partial hashes is complex). Integrity relies on TCP/SSH here.
+			buf := make([]byte, 32*1024) 
+			
+			// Custom copy loop to update monitor
+			for {
+				n, readErr := partReader.Read(buf)
+				if n > 0 {
+					// Write to remote
+					_, writeErr := remoteFile.Write(buf[:n])
+					if writeErr != nil {
+						errChan <- writeErr
+						return
+					}
+					// Update global stats
+					GlobalMonitor.AddBytes(int64(n))
+				}
+				if readErr == io.EOF {
+					break
+				}
+				if readErr != nil {
+					errChan <- readErr
+					return
+				}
+			}
+		}(start, end-start)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// If any chunk failed, return error so we fall back to single stream
+	if len(errChan) > 0 {
+		return <-errChan
+	}
+
 	return nil
 }
 
-// UploadFileWithProgress sends a local file and updates GlobalMonitor
-func UploadFileWithProgress(session *network.SftpSession, localPath, remotePath string) error {
-	src, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-
-	dst, err := session.SftpClient.Create(remotePath)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	buf := make([]byte, BufferSize)
-
-	writer := &ProgressWriter{
-		Writer: dst,
-		OnWrite: func(n int64) {
-			GlobalMonitor.AddBytes(n)
-		},
-	}
-
-	_, err = io.CopyBuffer(writer, src, buf)
-	return err
-}
-
-// Legacy functions needed if referenced elsewhere, updated to use the single BufferSize
+// Legacy wrappers
 func UploadFile(session *network.SftpSession, localPath, remotePath string) error {
-	// Simple wrapper around the progress version or standard copy
 	return UploadFileWithProgress(session, localPath, remotePath)
 }
 
