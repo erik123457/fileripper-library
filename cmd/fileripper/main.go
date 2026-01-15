@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +18,10 @@ import (
 	"fileripper/internal/server"
 )
 
+const SessionCount = 2 // Sessions (adjust if necessary)
+
 func main() {
-	fmt.Println("FileRipper v0.3.0 - Powered by PFTE Engine")
+	fmt.Println("FileRipper v0.4.0 - Powered by PFTE ")
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -29,7 +32,7 @@ func main() {
 
 	switch command {
 	case "start-server":
-		port := 112
+		port := 2935 // WTF was I thinking with 112?
 		if len(os.Args) > 2 {
 			p, err := strconv.Atoi(os.Args[2])
 			if err == nil {
@@ -50,7 +53,7 @@ func main() {
 func handleTransferCLI(args []string) {
 	if len(args) < 6 {
 		fmt.Println("Error: Missing arguments.")
-		fmt.Println("Usage: fileripper transfer <host> <port> <user> <password> [--upload <folder> | --download]")
+		fmt.Println("Usage: fileripper transfer <host> <port> <user> <pass> [--upload <local> <remote_dest> | --download <remote>]")
 		return
 	}
 
@@ -59,14 +62,28 @@ func handleTransferCLI(args []string) {
 	user := args[4]
 	password := args[5]
 	
-	operation := "DOWNLOAD" // Default
-	targetPath := ""
+	operation := "DOWNLOAD" 
+	sourcePath := "."       
+	destPath := "." // Default destination (Root)
 
-	if len(args) > 7 && strings.ToLower(args[6]) == "--upload" {
-		operation = "UPLOAD"
-		targetPath = args[7] // The folder to upload
-	} else if len(args) > 6 && strings.ToLower(args[6]) == "--download" {
-		operation = "DOWNLOAD"
+	if len(args) > 6 {
+		mode := strings.ToLower(args[6])
+		if mode == "--upload" {
+			operation = "UPLOAD"
+			if len(args) > 7 {
+				sourcePath = args[7]
+			}
+			// Capture remote destination if provided
+			if len(args) > 8 {
+				destPath = args[8]
+			}
+		} else if mode == "--download" {
+			operation = "DOWNLOAD"
+			if len(args) > 7 {
+				rawPath := args[7]
+				sourcePath = filepath.ToSlash(rawPath)
+			}
+		}
 	}
 
 	port, err := strconv.Atoi(portStr)
@@ -75,28 +92,41 @@ func handleTransferCLI(args []string) {
 		return
 	}
 
-	fmt.Printf(">> CLI Mode: %s. Target: %s@%s:%d\n", operation, user, host, port)
-
-	session := network.NewSession(host, port, user, password)
-	defer session.Close()
-
-	if err := session.Connect(); err != nil {
-		os.Exit(1)
+	targetDisplay := sourcePath
+	if operation == "UPLOAD" {
+		targetDisplay = fmt.Sprintf("%s -> %s", sourcePath, destPath)
 	}
+	
+	fmt.Printf(">> CLI Mode: %s. Target: %s (%s@%s:%d)\n", operation, targetDisplay, user, host, port)
 
-	if err := session.OpenSFTP(); err != nil {
-		os.Exit(1)
+	// --- DUAL SESSION INIT ---
+	var sessions []*network.SftpSession
+	fmt.Printf(">> Network: Establishing %d parallel tunnels...\n", SessionCount)
+
+	for i := 0; i < SessionCount; i++ {
+		sess := network.NewSession(host, port, user, password)
+		if err := sess.Connect(); err != nil {
+			fmt.Printf("Error connecting session #%d: %v\n", i+1, err)
+			os.Exit(1)
+		}
+		if err := sess.OpenSFTP(); err != nil {
+			fmt.Printf("Error opening SFTP #%d: %v\n", i+1, err)
+			os.Exit(1)
+		}
+		sessions = append(sessions, sess)
 	}
+	
+	defer func() {
+		for _, s := range sessions { s.Close() }
+	}()
 
 	engine := pfte.NewEngine()
 
-	// --- CLI DASHBOARD (Background Monitor) ---
-	// This goroutine prints the live stats to the console while the engine runs.
+	// --- CLI DASHBOARD ---
 	stopMonitor := make(chan bool)
 	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond) // Update 5 times a second
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
-		
 		for {
 			select {
 			case <-stopMonitor:
@@ -105,30 +135,22 @@ func handleTransferCLI(args []string) {
 			case <-ticker.C:
 				stats := pfte.GlobalMonitor.GetStats()
 				if stats.IsRunning {
-					// \r moves cursor to start of line, allowing overwrite
 					fmt.Printf("\r[PROGRESS] %.1f%% | Speed: %.2f MB/s | Files: %d/%d | Current: %s          ", 
-						stats.ProgressPercent, 
-						stats.SpeedMBs, 
-						stats.FilesDone, 
-						stats.TotalFiles,
-						limitString(stats.CurrentFile, 20),
-					)
+						stats.ProgressPercent, stats.SpeedMBs, stats.FilesDone, stats.TotalFiles, limitString(stats.CurrentFile, 20))
 				}
 			}
 		}
 	}()
 
-	// Start the Engine (Blocking call)
-	if err := engine.StartTransfer(session, operation, targetPath); err != nil {
-		fmt.Printf("\nError during transfer: %v\n", core.ErrPipelineStalled)
+	// Pass both Source and Dest
+	if err := engine.StartTransfer(sessions, operation, sourcePath, destPath); err != nil {
+		fmt.Printf("\nError during transfer: %v\n", err)
 	}
 	
-	// Stop the monitor cleanly
 	stopMonitor <- true
-	time.Sleep(100 * time.Millisecond) // Let the newline print
+	time.Sleep(100 * time.Millisecond) 
 }
 
-// Helper to prevent the UI from breaking if filename is too long
 func limitString(s string, max int) string {
 	if len(s) > max {
 		return s[:max] + "..."
@@ -142,6 +164,6 @@ Usage: fileripper [command] [args]
 
 Commands:
   start-server [port]   Start REST API Daemon
-  transfer              <host> <port> <user> <pass> [--upload <local_folder> | --download]
+  transfer              <host> <port> <user> <pass> [--upload <local> <remote_dest> | --download <remote>]
 `)
 }

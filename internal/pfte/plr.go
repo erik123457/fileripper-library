@@ -6,7 +6,6 @@ package pfte
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -27,18 +26,21 @@ func NewWorkerPool(concurrency int, queue *JobQueue) *WorkerPool {
 	}
 }
 
-// StartUnleash fires up the goroutines to consume the queue.
-func (wp *WorkerPool) StartUnleash(session *network.SftpSession) {
-	fmt.Printf(">> PLR: Unleashing %d workers...\n", wp.Concurrency)
+// StartUnleash fires up the goroutines using ROUND ROBIN session balancing.
+func (wp *WorkerPool) StartUnleash(sessions []*network.SftpSession) {
+	sessionCount := len(sessions)
+	fmt.Printf(">> PLR: Unleashing %d workers across %d tunnels...\n", wp.Concurrency, sessionCount)
 	
 	GlobalMonitor.SetRunning(true)
-	
 	start := time.Now()
 
 	for i := 0; i < wp.Concurrency; i++ {
 		wp.Wg.Add(1)
 		
-		go func(workerID int) {
+		// Load Balance: Worker 0 -> Sess 0, Worker 1 -> Sess 1, Worker 2 -> Sess 0...
+		assignedSession := sessions[i % sessionCount]
+
+		go func(workerID int, sess *network.SftpSession) {
 			defer wp.Wg.Done()
 			
 			for {
@@ -51,20 +53,21 @@ func (wp *WorkerPool) StartUnleash(session *network.SftpSession) {
 
 				var err error
 				if job.Operation == "DOWNLOAD" {
-					err = DownloadFileWithProgress(session, job.RemotePath, job.LocalPath)
+					err = DownloadFileWithProgress(sess, job.RemotePath, job.LocalPath)
 				} else if job.Operation == "UPLOAD" {
-					err = UploadFileWithProgress(session, job.LocalPath, job.RemotePath)
+					err = UploadFileWithProgress(sess, job.LocalPath, job.RemotePath)
 				}
 
 				if err != nil {
-					// Uses log
-					log.Printf("[Worker %d] Failed %s: %v", workerID, job.RemotePath, err)
+					// Concise logging to avoid console spam
+					// log.Printf("[Worker %d] Fail: %v", workerID, err)
+					// Simple retry logic is inside transfer functions
 					continue
 				}
 
 				GlobalMonitor.IncFileDone()
 			}
-		}(i)
+		}(i, assignedSession)
 	}
 
 	wp.Wg.Wait()

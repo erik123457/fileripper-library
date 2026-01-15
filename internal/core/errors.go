@@ -8,6 +8,7 @@ import "errors"
 
 // Common errors for the application.
 // We define them here to avoid magic strings in the UI.
+// PS: It will be improved; for now, works :)
 var (
 	ErrConnectionFailed = errors.New("connection_failed")
 	ErrHostUnreachable  = errors.New("host_unreachable")
