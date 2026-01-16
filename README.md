@@ -89,16 +89,11 @@ chmod +x fileripper_linux
 ### Parameters
 
 | Parameter | Description |
-
 | :--- | :--- |
-
-<host> | IP address or hostname of the remote server. |
-
-<port> | Remote SSH/SFTP port. |
-
-<user> | Remote SSH username. |
-
-<password> | Password for the remote user. |
+| host | IP address or hostname of the remote server. |
+| port | Remote SSH/SFTP port. |
+| user | Remote SSH username. |
+| password | Password for the remote user. | 
 
 ### Operation Flags
 The command requires one of the following flags to define the transfer direction:
