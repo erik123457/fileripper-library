@@ -295,3 +295,57 @@ func findRemotePath(client *sftp.Client, root, targetName string, maxDepth int) 
 	}
 	return ""
 }
+
+func (e *Engine) UploadSpecificFile(ctx context.Context, sessions []*network.SftpSession, local, remote string) error {
+	if len(sessions) == 0 || sessions[0].SftpClient == nil {
+		return fmt.Errorf("no_active_sessions")
+	}
+	st, err := os.Stat(local)
+	if err != nil {
+		return err
+	}
+	if st.IsDir() {
+		return fmt.Errorf("source_is_directory")
+	}
+	e.Queue.Add(&TransferJob{
+		LocalPath:  local,
+		RemotePath: remote,
+		Operation:  "UPLOAD",
+	})
+	GlobalMonitor.Reset(1, st.Size())
+	c := BatchSizeConservative
+	if e.Mode == ModeBoost {
+		c = BatchSizeBoost
+	}
+	NewWorkerPool(c, e.Queue).StartUnleash(ctx, sessions)
+	return nil
+}
+
+func (e *Engine) DownloadSpecificFile(ctx context.Context, sessions []*network.SftpSession, remote, local string) error {
+	if len(sessions) == 0 || sessions[0].SftpClient == nil {
+		return fmt.Errorf("no_active_sessions")
+	}
+	st, err := sessions[0].SftpClient.Stat(remote)
+	if err != nil {
+		return err
+	}
+	if st.IsDir() {
+		return fmt.Errorf("remote_is_directory")
+	}
+	ld := filepath.Dir(local)
+	if _, err := os.Stat(ld); os.IsNotExist(err) {
+		os.MkdirAll(ld, 0755)
+	}
+	e.Queue.Add(&TransferJob{
+		LocalPath:  local,
+		RemotePath: remote,
+		Operation:  "DOWNLOAD",
+	})
+	GlobalMonitor.Reset(1, st.Size())
+	c := BatchSizeConservative
+	if e.Mode == ModeBoost {
+		c = BatchSizeBoost
+	}
+	NewWorkerPool(c, e.Queue).StartUnleash(ctx, sessions)
+	return nil
+}

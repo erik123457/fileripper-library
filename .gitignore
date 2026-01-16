@@ -9,7 +9,4 @@ winscp_log.xml
 winscp_dump
 *.zip
 main
-fileripper_linux
-fileripper-linux-0.5.0
-fileripper-win
-account
+build

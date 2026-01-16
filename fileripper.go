@@ -59,17 +59,30 @@ func (s *Session) Close() {
 	s.inner.Close()
 }
 
-// Transfer starts a batch upload or download
 func (c *Client) Transfer(ctx context.Context, sessions []*Session, operation, source, dest string) error {
 	sftpSessions := make([]*network.SftpSession, len(sessions))
 	for i, s := range sessions {
 		sftpSessions[i] = s.inner
 	}
-	// (We return the error so the caller can decide how to show it)
 	return c.engine.StartTransfer(ctx, sftpSessions, operation, source, dest)
 }
 
-// SetMode changes how the engine behaves (Boost or Conservative)
+func (c *Client) UploadFile(ctx context.Context, sessions []*Session, local, remote string) error {
+	s := make([]*network.SftpSession, len(sessions))
+	for i, sess := range sessions {
+		s[i] = sess.inner
+	}
+	return c.engine.UploadSpecificFile(ctx, s, local, remote)
+}
+
+func (c *Client) DownloadFile(ctx context.Context, sessions []*Session, remote, local string) error {
+	s := make([]*network.SftpSession, len(sessions))
+	for i, sess := range sessions {
+		s[i] = sess.inner
+	}
+	return c.engine.DownloadSpecificFile(ctx, s, remote, local)
+}
+
 func (c *Client) SetMode(mode pfte.TransferMode) {
 	c.engine.Mode = mode
 }
