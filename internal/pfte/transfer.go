@@ -1,6 +1,18 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
-// If a copy of the MPL was not distributed with this file, You can obtain one at
-// https://mozilla.org/MPL/2.0/.
+/*
+ * Copyright 2026 The FileRipper Team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package pfte
 
@@ -16,9 +28,9 @@ import (
 )
 
 const (
-	BufferSize        = 64 * 1024 // 64KB for standard streams
+	BufferSize         = 64 * 1024        // 64KB for standard streams
 	MultipartThreshold = 10 * 1024 * 1024 // 10MB. Files larger than this get split.
-	MultipartChunks    = 16 // The user requested 16 chunks for the tail file.
+	MultipartChunks    = 16               // The user requested 16 chunks for the tail file.
 )
 
 // ProgressTracker wraps an io.Reader to update monitor and compute hash simultaneously.
@@ -26,14 +38,14 @@ type ProgressTracker struct {
 	Reader io.Reader
 	Hasher hash.Hash32
 	// Lock needed because multiple chunks might update metrics concurrently
-	Mu     sync.Mutex 
+	Mu sync.Mutex
 }
 
 func (pt *ProgressTracker) Read(p []byte) (int, error) {
 	n, err := pt.Reader.Read(p)
 	if n > 0 {
 		GlobalMonitor.AddBytes(int64(n))
-		
+
 		// Hasher is not thread-safe, so if we used this in multipart we'd need locking.
 		// For multipart, we might skip hashing or handle it differently.
 		// For now, we lock just in case.
@@ -133,12 +145,12 @@ func uploadSingleStream(session *network.SftpSession, localPath, remotePath stri
 				return err
 			}
 
-			_ = fmt.Sprintf("%x", tracker.Hasher.Sum32()) 
+			_ = fmt.Sprintf("%x", tracker.Hasher.Sum32())
 			return nil
 		}()
 
 		if lastErr == nil {
-			break 
+			break
 		}
 	}
 	return lastErr
@@ -148,7 +160,7 @@ func uploadSingleStream(session *network.SftpSession, localPath, remotePath stri
 func uploadMultipart(session *network.SftpSession, localPath, remotePath string, size int64) error {
 	// Calculate chunk size
 	chunkSize := size / int64(MultipartChunks)
-	
+
 	// Create the remote file once to ensure it exists and is truncated
 	f, err := session.SftpClient.Create(remotePath)
 	if err != nil {
@@ -162,7 +174,7 @@ func uploadMultipart(session *network.SftpSession, localPath, remotePath string,
 	// Launch 16 mini-workers
 	for i := 0; i < MultipartChunks; i++ {
 		wg.Add(1)
-		
+
 		start := int64(i) * chunkSize
 		end := start + chunkSize
 		if i == MultipartChunks-1 {
@@ -201,15 +213,15 @@ func uploadMultipart(session *network.SftpSession, localPath, remotePath string,
 			}
 
 			// Limit the reader to this chunk's length
-			partReader := io.LimitReader(localFile, length - offset) // logic fix below
+			partReader := io.LimitReader(localFile, length-offset) // logic fix below
 			// Actually LimitReader takes size, not end pos.
-			partReader = io.LimitReader(localFile, length) 
+			partReader = io.LimitReader(localFile, length)
 
 			// We wrap for stats updating
 			// Note: Hasher is skipped in multipart for speed/complexity reasons
 			// (Merging 16 partial hashes is complex). Integrity relies on TCP/SSH here.
-			buf := make([]byte, 32*1024) 
-			
+			buf := make([]byte, 32*1024)
+
 			// Custom copy loop to update monitor
 			for {
 				n, readErr := partReader.Read(buf)

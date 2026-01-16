@@ -1,13 +1,25 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
-// If a copy of the MPL was not distributed with this file, You can obtain one at
-// https://mozilla.org/MPL/2.0/.
+/*
+ * Copyright 2026 The FileRipper Team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package pfte
 
 import (
 	"fmt"
 	"os"
-	"path" 
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,9 +31,9 @@ import (
 )
 
 const (
-	BatchSizeBoost        = 128 
+	BatchSizeBoost        = 128
 	BatchSizeConservative = 4
-	DirCreationWorkers    = 8 
+	DirCreationWorkers    = 8
 )
 
 type TransferMode int
@@ -76,11 +88,13 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 				fmt.Printf(">> Warning: Error accessing %s: %v\n", p, err)
 				return nil
 			}
-			
+
 			// Calculate relative path from local base (e.g., "account/meta.xml")
 			relPath, err := filepath.Rel(baseDir, p)
-			if err != nil { return err }
-			
+			if err != nil {
+				return err
+			}
+
 			// Join with remote destination (e.g., "/mods/.../[OWL]" + "account/meta.xml")
 			// We use path.Join for SFTP (forward slashes)
 			remoteRel := filepath.ToSlash(relPath)
@@ -100,7 +114,9 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 			}
 			return nil
 		})
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 
 		sort.Slice(foldersToCreate, func(i, j int) bool {
 			return len(foldersToCreate[i]) < len(foldersToCreate[j])
@@ -112,10 +128,12 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 			dirChan := make(chan string, dirCount)
 			var wg sync.WaitGroup
 			var doneCount int32
-			var printMu sync.Mutex 
-			for _, d := range foldersToCreate { dirChan <- d }
+			var printMu sync.Mutex
+			for _, d := range foldersToCreate {
+				dirChan <- d
+			}
 			close(dirChan)
-			
+
 			for i := 0; i < DirCreationWorkers; i++ {
 				wg.Add(1)
 				go func() {
@@ -135,17 +153,21 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 		}
 
 		fileCount := int64(len(filesToTransfer))
-		if fileCount == 0 { return nil }
+		if fileCount == 0 {
+			return nil
+		}
 
 		fmt.Printf(">> PFTE: Phase 2 - Queuing %d files...\n", fileCount)
-		for _, job := range filesToTransfer { e.Queue.Add(job) }
+		for _, job := range filesToTransfer {
+			e.Queue.Add(job)
+		}
 		GlobalMonitor.Reset(fileCount, totalBytes)
-		
+
 		workerPool := NewWorkerPool(concurrency, e.Queue)
 		workerPool.StartUnleash(sessions)
 		return nil
 
-	// --- DOWNLOAD LOGIC (Unchanged but using sourcePath) ---
+		// --- DOWNLOAD LOGIC (Unchanged but using sourcePath) ---
 	} else {
 		// Just mapping arguments: sourcePath is what we want to download
 		return e.startDownload(sessions, mainSession, concurrency, sourcePath)
@@ -163,16 +185,20 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 	fmt.Printf(">> Remote PWD: %s\n", pwd)
 
 	targetName := path.Base(targetPath)
-	if targetPath == "" || targetPath == "." { targetName = "" }
+	if targetPath == "" || targetPath == "." {
+		targetName = ""
+	}
 	remoteSource := targetPath
-	if remoteSource == "" { remoteSource = "." }
+	if remoteSource == "" {
+		remoteSource = "."
+	}
 
 	fmt.Printf(">> PFTE: Verifying '%s'...\n", remoteSource)
-	
+
 	var info os.FileInfo
 	var err error
 	info, err = mainSession.SftpClient.Lstat(remoteSource)
-	
+
 	if err != nil && targetName != "" {
 		fmt.Println(">> Status: Path not found. Initiating Deep Search (Depth: 3)...")
 		foundPath := findRemotePath(mainSession.SftpClient, ".", targetName, 3)
@@ -184,27 +210,35 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 			return fmt.Errorf("target not found")
 		}
 	}
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	queuedCount := int64(0)
 	totalBytes := int64(0)
-	
+
 	fmt.Printf(">> PFTE: Scanning '%s' recursively...\n", remoteSource)
 
 	walker := mainSession.SftpClient.Walk(remoteSource)
 	for walker.Step() {
-		if walker.Err() != nil { continue }
+		if walker.Err() != nil {
+			continue
+		}
 		remotePath := walker.Path()
 		stat := walker.Stat()
 
 		relPath, err := filepath.Rel(remoteSource, remotePath)
-		if err != nil { relPath = filepath.Base(remotePath) }
+		if err != nil {
+			relPath = filepath.Base(remotePath)
+		}
 		rootDirName := filepath.Base(remoteSource)
-		if remoteSource == "." || remoteSource == "/" { rootDirName = "root_dump" }
+		if remoteSource == "." || remoteSource == "/" {
+			rootDirName = "root_dump"
+		}
 		localPath := filepath.Join(localBase, rootDirName, relPath)
 
 		if !info.IsDir() && remotePath == remoteSource {
-			localPath = filepath.Join(localBase, rootDirName) 
+			localPath = filepath.Join(localBase, rootDirName)
 		}
 
 		if stat.IsDir() {
@@ -223,7 +257,7 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 
 	fmt.Printf(">> PFTE: Job ready. Files: %d, Total Size: %d bytes.\n", queuedCount, totalBytes)
 	GlobalMonitor.Reset(queuedCount, totalBytes)
-	
+
 	if queuedCount > 0 {
 		workerPool := NewWorkerPool(concurrency, e.Queue)
 		workerPool.StartUnleash(sessions)
@@ -234,9 +268,13 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 }
 
 func findRemotePath(client *sftp.Client, root, targetName string, maxDepth int) string {
-	if maxDepth < 0 { return "" }
+	if maxDepth < 0 {
+		return ""
+	}
 	files, err := client.ReadDir(root)
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	for _, f := range files {
 		if strings.EqualFold(f.Name(), targetName) {
 			return path.Join(root, f.Name())
@@ -245,7 +283,9 @@ func findRemotePath(client *sftp.Client, root, targetName string, maxDepth int) 
 	for _, f := range files {
 		if f.IsDir() {
 			found := findRemotePath(client, path.Join(root, f.Name()), targetName, maxDepth-1)
-			if found != "" { return found }
+			if found != "" {
+				return found
+			}
 		}
 	}
 	return ""

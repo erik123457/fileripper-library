@@ -1,6 +1,18 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
-// If a copy of the MPL was not distributed with this file, You can obtain one at
-// https://mozilla.org/MPL/2.0/.
+/*
+ * Copyright 2026 The FileRipper Team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package pfte
 
@@ -29,19 +41,19 @@ type TransferStats struct {
 }
 
 type TransferMonitor struct {
-	totalFiles      int64
-	filesDone       int64
-	totalBytes      int64
-	bytesDone       int64 // Atomic
-	
-	currentFile     string
-	mu              sync.Mutex // Protects string and bools
-	isRunning       bool
+	totalFiles int64
+	filesDone  int64
+	totalBytes int64
+	bytesDone  int64 // Atomic
+
+	currentFile string
+	mu          sync.Mutex // Protects string and bools
+	isRunning   bool
 
 	// Speed calculation helpers
-	lastBytes       int64
-	lastCheck       time.Time
-	currentSpeed    float64
+	lastBytes    int64
+	lastCheck    time.Time
+	currentSpeed float64
 }
 
 func NewMonitor() *TransferMonitor {
@@ -54,12 +66,12 @@ func NewMonitor() *TransferMonitor {
 func (m *TransferMonitor) Reset(totalFiles, totalBytes int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	atomic.StoreInt64(&m.totalFiles, totalFiles)
 	atomic.StoreInt64(&m.totalBytes, totalBytes)
 	atomic.StoreInt64(&m.filesDone, 0)
 	atomic.StoreInt64(&m.bytesDone, 0)
-	
+
 	m.currentFile = "Initializing..."
 	m.isRunning = true
 	m.lastBytes = 0
@@ -96,13 +108,13 @@ func (m *TransferMonitor) GetStats() TransferStats {
 	now := time.Now()
 	bytesNow := atomic.LoadInt64(&m.bytesDone)
 	totalBytes := atomic.LoadInt64(&m.totalBytes)
-	
+
 	// Calculate Speed (Moving average could be better, but instant is fine for now)
 	duration := now.Sub(m.lastCheck).Seconds()
 	if duration >= 0.5 { // Update speed every 500ms approx
 		diff := bytesNow - m.lastBytes
 		m.currentSpeed = (float64(diff) / 1024 / 1024) / duration // MB/s
-		
+
 		m.lastBytes = bytesNow
 		m.lastCheck = now
 	}

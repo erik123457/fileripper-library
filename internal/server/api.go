@@ -1,6 +1,18 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
-// If a copy of the MPL was not distributed with this file, You can obtain one at
-// https://mozilla.org/MPL/2.0/.
+/*
+ * Copyright 2026 The FileRipper Team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package server
 
@@ -30,15 +42,15 @@ func StartDaemon(port int) {
 	// Auth & Session Management
 	http.HandleFunc("/api/connect", handleConnect)
 	http.HandleFunc("/api/disconnect", handleDisconnect)
-	
+
 	// File System Operations
 	http.HandleFunc("/api/files", handleListFiles)
-	
+
 	// Real-time Monitoring
 	http.HandleFunc("/api/progress", handleProgress)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	
+
 	// This blocks forever
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
@@ -90,7 +102,7 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Init Session
 	session := network.NewSession(req.Host, req.Port, req.User, req.Password)
-	
+
 	// 2. SSH Handshake
 	if err := session.Connect(); err != nil {
 		sendJSON(w, false, "Connection failed: "+err.Error(), nil)
@@ -161,7 +173,7 @@ func handleProgress(w http.ResponseWriter, r *http.Request) {
 	// Flutter will poll this endpoint frequently (e.g. 200ms).
 	// We return a snapshot of the atomic counters from the engine.
 	stats := pfte.GlobalMonitor.GetStats()
-	
+
 	sendJSON(w, true, "OK", stats)
 }
 
@@ -169,7 +181,7 @@ func handleProgress(w http.ResponseWriter, r *http.Request) {
 
 func sendJSON(w http.ResponseWriter, success bool, message string, data any) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	// Prevent CORS issues during local dev (Flutter web/debug)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 

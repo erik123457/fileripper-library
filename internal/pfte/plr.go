@@ -1,6 +1,18 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
-// If a copy of the MPL was not distributed with this file, You can obtain one at
-// https://mozilla.org/MPL/2.0/.
+/*
+ * Copyright 2026 The FileRipper Team
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package pfte
 
@@ -30,23 +42,23 @@ func NewWorkerPool(concurrency int, queue *JobQueue) *WorkerPool {
 func (wp *WorkerPool) StartUnleash(sessions []*network.SftpSession) {
 	sessionCount := len(sessions)
 	fmt.Printf(">> PLR: Unleashing %d workers across %d tunnels...\n", wp.Concurrency, sessionCount)
-	
+
 	GlobalMonitor.SetRunning(true)
 	start := time.Now()
 
 	for i := 0; i < wp.Concurrency; i++ {
 		wp.Wg.Add(1)
-		
+
 		// Load Balance: Worker 0 -> Sess 0, Worker 1 -> Sess 1, Worker 2 -> Sess 0...
-		assignedSession := sessions[i % sessionCount]
+		assignedSession := sessions[i%sessionCount]
 
 		go func(workerID int, sess *network.SftpSession) {
 			defer wp.Wg.Done()
-			
+
 			for {
 				job := wp.Queue.Pop()
 				if job == nil {
-					return 
+					return
 				}
 
 				GlobalMonitor.SetCurrentFile(job.RemotePath)
@@ -72,7 +84,7 @@ func (wp *WorkerPool) StartUnleash(sessions []*network.SftpSession) {
 
 	wp.Wg.Wait()
 	GlobalMonitor.SetRunning(false)
-	
+
 	duration := time.Since(start)
 	fmt.Printf(">> PLR: Batch complete in %v.\n", duration)
 }
