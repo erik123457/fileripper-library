@@ -71,31 +71,55 @@ Result: If everything went well, you should see `fileripper.exe` (or the binary 
 
 ---
 
-# To use the program via the terminal:
+# Terminal Usage Guide
+
+## Execution Permissions in Linux
+Before running the program in Linux, you must grant execute permissions to the binary. Otherwise, you will receive a "Permission denied" error. Run the following command:
+
+```bash
+chmod +x fileripper_linux
+```
 
 ## Syntax
 
 ```bash
-./fileripper.exe transfer <host> <port> <user> <password> <operation_flag> [target]
+./[FileRipper_Executable] transfer <host> <port> <user> <password> <operation_flag>
 ```
 
-Parameters (required)
+### Parameters
 
-- `<host>`: The IP address or hostname of the remote server.
+| Parameter | Description |
 
-- `<port>`: The remote SSH port.
+| :--- | :--- |
 
-- `<user>`: The remote SSH username.
+<host> | IP address or hostname of the remote server. |
 
-- `<password>`: The user's password.
+<port> | Remote SSH/SFTP port. |
 
-Operation flags (required)
+<user> | Remote SSH username. |
 
+<password> | Password for the remote user. |
+
+### Operation Flags
 The command requires one of the following flags to define the transfer direction:
 
-- `--upload <local_folder_path>`: Recursively scans the local folder and uploads all contents to the remote root directory. This enables Boost mode (128 workers).
+* `--upload <local_path>`: Recursively scans the specified local folder or file and uploads all contents to the remote directory. This enables Boost mode (128 concurrent workers).
 
-- `--download`: Downloads all files from the remote root directory. (/) to a local dump folder/. Enables Boost mode (128 workers).
+* `--download <remote_path>`: Scans the specified remote path and downloads all contents to a local `./dump/` folder. This enables Boost mode (128 concurrent workers).
+
+## Examples
+
+### Upload
+```bash
+./fileripper_linux transfer 1.1.1.1 22 root mypassword --upload ./my_project
+```
+
+### Download
+```bash
+./fileripper_windows.exe transfer 1.1.1.1 22 root mypassword --download /example
+```
+
+---
 
 ### Feature Support and Roadmap
 
