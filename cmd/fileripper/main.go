@@ -33,7 +33,7 @@ import (
 const SessionCount = 2 // Sessions (adjust if necessary)
 
 func main() {
-	fmt.Println("FileRipper v0.4.0 - Powered by PFTE ")
+	fmt.Println("FileRipper v0.5.0 - Powered by PFTE ")
 
 	if len(os.Args) < 2 {
 		printUsage()
