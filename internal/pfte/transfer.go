@@ -17,7 +17,7 @@
 package pfte
 
 import (
-	"fmt"
+	"context"
 	"hash"
 	"hash/crc32"
 	"io"
@@ -58,7 +58,7 @@ func (pt *ProgressTracker) Read(p []byte) (int, error) {
 }
 
 // DownloadFileWithProgress pulls a remote file safely.
-func DownloadFileWithProgress(session *network.SftpSession, remotePath, localPath string) error {
+func DownloadFileWithProgress(ctx context.Context, session *network.SftpSession, remotePath, localPath string) error {
 	var lastErr error
 	buf := make([]byte, BufferSize)
 
@@ -81,7 +81,8 @@ func DownloadFileWithProgress(session *network.SftpSession, remotePath, localPat
 				Hasher: crc32.NewIEEE(),
 			}
 
-			_, err = io.CopyBuffer(dst, tracker, buf)
+			// (We use a custom copy loop to support context cancellation)
+			_, err = copyWithContext(ctx, dst, tracker, buf)
 			if err != nil {
 				return err
 			}
@@ -101,7 +102,7 @@ func DownloadFileWithProgress(session *network.SftpSession, remotePath, localPat
 }
 
 // UploadFileWithProgress decides whether to use Single Stream or Multipart Swarm.
-func UploadFileWithProgress(session *network.SftpSession, localPath, remotePath string) error {
+func UploadFileWithProgress(ctx context.Context, session *network.SftpSession, localPath, remotePath string) error {
 	// 1. Check file size
 	info, err := os.Stat(localPath)
 	if err != nil {
@@ -112,8 +113,7 @@ func UploadFileWithProgress(session *network.SftpSession, localPath, remotePath 
 	// 2. Decision Matrix
 	if fileSize >= MultipartThreshold {
 		// Try Multipart upload for large files to kill the "tail effect"
-		// fmt.Printf("\n>> Turbo: Splitting %s into 16 chunks...\n", localPath)
-		err := uploadMultipart(session, localPath, remotePath, fileSize)
+		err := uploadMultipart(ctx, session, localPath, remotePath, fileSize)
 		if err == nil {
 			return nil
 		}
@@ -122,11 +122,11 @@ func UploadFileWithProgress(session *network.SftpSession, localPath, remotePath 
 	}
 
 	// 3. Fallback / Standard Upload
-	return uploadSingleStream(session, localPath, remotePath)
+	return uploadSingleStream(ctx, session, localPath, remotePath)
 }
 
 // uploadSingleStream is the robust, standard upload logic.
-func uploadSingleStream(session *network.SftpSession, localPath, remotePath string) error {
+func uploadSingleStream(ctx context.Context, session *network.SftpSession, localPath, remotePath string) error {
 	var lastErr error
 	buf := make([]byte, BufferSize)
 
@@ -154,7 +154,7 @@ func uploadSingleStream(session *network.SftpSession, localPath, remotePath stri
 				Hasher: crc32.NewIEEE(),
 			}
 
-			_, err = io.CopyBuffer(dst, tracker, buf)
+			_, err = copyWithContext(ctx, dst, tracker, buf)
 			if err != nil {
 				return err
 			}
@@ -163,7 +163,6 @@ func uploadSingleStream(session *network.SftpSession, localPath, remotePath stri
 			_ = session.SftpClient.Chtimes(remotePath, time.Now(), info.ModTime())
 			_ = session.SftpClient.Chmod(remotePath, info.Mode())
 
-			_ = fmt.Sprintf("%x", tracker.Hasher.Sum32())
 			return nil
 		}()
 
@@ -175,7 +174,7 @@ func uploadSingleStream(session *network.SftpSession, localPath, remotePath stri
 }
 
 // uploadMultipart splits the file and uploads parts in parallel.
-func uploadMultipart(session *network.SftpSession, localPath, remotePath string, size int64) error {
+func uploadMultipart(ctx context.Context, session *network.SftpSession, localPath, remotePath string, size int64) error {
 	// Calculate chunk size
 	chunkSize := size / int64(MultipartChunks)
 
@@ -242,6 +241,13 @@ func uploadMultipart(session *network.SftpSession, localPath, remotePath string,
 
 			// Custom copy loop to update monitor
 			for {
+				select {
+				case <-ctx.Done():
+					errChan <- ctx.Err()
+					return
+				default:
+				}
+
 				n, readErr := partReader.Read(buf)
 				if n > 0 {
 					// Write to remote
@@ -281,11 +287,43 @@ func uploadMultipart(session *network.SftpSession, localPath, remotePath string,
 	return nil
 }
 
-// Legacy wrappers
-func UploadFile(session *network.SftpSession, localPath, remotePath string) error {
-	return UploadFileWithProgress(session, localPath, remotePath)
+// Legacy wrappers (now with context)
+func UploadFile(ctx context.Context, session *network.SftpSession, localPath, remotePath string) error {
+	return UploadFileWithProgress(ctx, session, localPath, remotePath)
 }
 
-func DownloadFile(session *network.SftpSession, remotePath, localPath string) error {
-	return DownloadFileWithProgress(session, remotePath, localPath)
+func DownloadFile(ctx context.Context, session *network.SftpSession, remotePath, localPath string) error {
+	return DownloadFileWithProgress(ctx, session, remotePath, localPath)
+}
+
+// copyWithContext is a helper to allow cancellation during io.Copy
+func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader, buf []byte) (int64, error) {
+	var written int64
+	for {
+		select {
+		case <-ctx.Done():
+			return written, ctx.Err()
+		default:
+		}
+
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if ew != nil {
+				return written, ew
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return written, nil
+			}
+			return written, er
+		}
+	}
 }

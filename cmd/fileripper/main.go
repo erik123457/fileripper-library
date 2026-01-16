@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,16 +25,16 @@ import (
 	"strings"
 	"time"
 
+	"fileripper"
 	"fileripper/internal/core"
-	"fileripper/internal/network"
 	"fileripper/internal/pfte"
 	"fileripper/internal/server"
 )
 
-const SessionCount = 2 // Sessions (adjust if necessary)
+const SessionCount = 2 // Parallel SSH Sessions
 
 func main() {
-	fmt.Println("FileRipper v0.5.0 - Powered by PFTE ")
+	fmt.Println("FileRipper v0.6.0 - Powered by PFTE ")
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -44,7 +45,7 @@ func main() {
 
 	switch command {
 	case "start-server":
-		port := 2935 // WTF was I thinking with 112?
+		port := 2935 
 		if len(os.Args) > 2 {
 			p, err := strconv.Atoi(os.Args[2])
 			if err == nil {
@@ -76,7 +77,7 @@ func handleTransferCLI(args []string) {
 
 	operation := "DOWNLOAD"
 	sourcePath := "."
-	destPath := "." // Default destination (Root)
+	destPath := "." 
 
 	if len(args) > 6 {
 		mode := strings.ToLower(args[6])
@@ -85,7 +86,6 @@ func handleTransferCLI(args []string) {
 			if len(args) > 7 {
 				sourcePath = args[7]
 			}
-			// Capture remote destination if provided
 			if len(args) > 8 {
 				destPath = args[8]
 			}
@@ -112,17 +112,13 @@ func handleTransferCLI(args []string) {
 	fmt.Printf(">> CLI Mode: %s. Target: %s (%s@%s:%d)\n", operation, targetDisplay, user, host, port)
 
 	// --- DUAL SESSION INIT ---
-	var sessions []*network.SftpSession
+	var sessions []*fileripper.Session
 	fmt.Printf(">> Network: Establishing %d parallel tunnels...\n", SessionCount)
 
 	for i := 0; i < SessionCount; i++ {
-		sess := network.NewSession(host, port, user, password)
+		sess := fileripper.NewSession(host, port, user, password)
 		if err := sess.Connect(); err != nil {
 			fmt.Printf("Error connecting session #%d: %v\n", i+1, err)
-			os.Exit(1)
-		}
-		if err := sess.OpenSFTP(); err != nil {
-			fmt.Printf("Error opening SFTP #%d: %v\n", i+1, err)
 			os.Exit(1)
 		}
 		sessions = append(sessions, sess)
@@ -134,42 +130,81 @@ func handleTransferCLI(args []string) {
 		}
 	}()
 
-	engine := pfte.NewEngine()
+	client := fileripper.NewClient()
+	ctx := context.Background()
+	startTime := time.Now()
 
-	// --- CLI DASHBOARD ---
+	// --- CLI DASHBOARD GOROUTINE ---
 	stopMonitor := make(chan bool)
 	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-stopMonitor:
-				fmt.Println("\n>> Monitor stopped.")
 				return
 			case <-ticker.C:
 				stats := pfte.GlobalMonitor.GetStats()
 				if stats.IsRunning {
-					fmt.Printf("\r[PROGRESS] %.1f%% | Speed: %.2f MB/s | Files: %d/%d | Current: %s          ",
-						stats.ProgressPercent, stats.SpeedMBs, stats.FilesDone, stats.TotalFiles, limitString(stats.CurrentFile, 20))
+					elapsed := time.Since(startTime).Round(time.Second)
+					// \r moves cursor to start, \033[K clears the line forward to prevent stuttering
+					fmt.Printf("\r\033[KTransferred: %s / %s, %.0f%%, %.2f MB/s, ETA %s | Files: %d/%d | %s",
+						formatBytes(stats.BytesDone), formatBytes(stats.TotalBytes),
+						stats.ProgressPercent, stats.SpeedMBs,
+						calculateETA(stats.BytesDone, stats.TotalBytes, stats.SpeedMBs),
+						stats.FilesDone, stats.TotalFiles,
+						elapsed)
 				}
 			}
 		}
 	}()
 
-	// Pass both Source and Dest
-	if err := engine.StartTransfer(sessions, operation, sourcePath, destPath); err != nil {
-		fmt.Printf("\nError during transfer: %v\n", err)
-	}
+	// Execute the Transfer
+	errTransfer := client.Transfer(ctx, sessions, operation, sourcePath, destPath)
 
+	// Stop monitor and wait a bit for the last print
 	stopMonitor <- true
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
+
+	// --- FINAL SUMMARY (Fixes the 2/3 bug and adds Rclone-style finish) ---
+	stats := pfte.GlobalMonitor.GetStats()
+	totalElapsed := time.Since(startTime).Round(time.Second)
+
+	if errTransfer == nil {
+		// Force the 100% display and correct file count
+		fmt.Printf("\r\033[KTransferred: %s / %s, 100%%, %.2f MB/s, ETA 0s | Files: %d/%d | %s\n",
+			formatBytes(stats.TotalBytes), formatBytes(stats.TotalBytes),
+			stats.SpeedMBs, stats.TotalFiles, stats.TotalFiles, totalElapsed)
+		
+		fmt.Printf(">> Status: Finished %s successfully in %s.\n", strings.ToLower(operation), totalElapsed)
+	} else {
+		fmt.Printf("\n>> Status: Transfer failed after %s: %v\n", totalElapsed, errTransfer)
+	}
 }
 
-func limitString(s string, max int) string {
-	if len(s) > max {
-		return s[:max] + "..."
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
 	}
-	return s
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func calculateETA(done, total int64, speedMBs float64) string {
+	if speedMBs <= 0 {
+		return "---"
+	}
+	remainingBytes := total - done
+	if remainingBytes <= 0 {
+		return "0s"
+	}
+	seconds := float64(remainingBytes) / (speedMBs * 1024 * 1024)
+	return time.Duration(seconds * float64(time.Second)).Round(time.Second).String()
 }
 
 func printUsage() {

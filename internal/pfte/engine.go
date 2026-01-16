@@ -17,6 +17,7 @@
 package pfte
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
@@ -55,8 +56,8 @@ func NewEngine() *Engine {
 	}
 }
 
-// StartTransfer now accepts sourcePath (local/remote) and destPath (remote dest for upload)
-func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string, sourcePath string, destPath string) error {
+// StartTransfer handles the heavy lifting (source can be local or remote)
+func (e *Engine) StartTransfer(ctx context.Context, sessions []*network.SftpSession, operation string, sourcePath string, destPath string) error {
 	if len(sessions) == 0 || sessions[0].SftpClient == nil {
 		return fmt.Errorf("no_active_sessions")
 	}
@@ -74,8 +75,6 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 			return fmt.Errorf("failed to get absolute path: %v", err)
 		}
 
-		fmt.Printf(">> PFTE: Source '%s' -> Remote '%s'\n", absSource, destPath)
-
 		// Base dir is the parent of the source folder (e.g., C:\Users\...)
 		baseDir := filepath.Dir(absSource)
 
@@ -85,24 +84,19 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 
 		err = filepath.Walk(absSource, func(p string, info os.FileInfo, err error) error {
 			if err != nil {
-				fmt.Printf(">> Warning: Error accessing %s: %v\n", p, err)
-				return nil
+				return nil // (We skip errors to keep the flow going)
 			}
 
-			// Handle Symlinks: We follow them to keep it simple and functional across OS
+			// Handle Symlinks: We follow them to keep it simple across OS
 			if info.Mode()&os.ModeSymlink != 0 {
 				resolvedPath, err := filepath.EvalSymlinks(p)
 				if err != nil {
-					fmt.Printf(">> Warning: Could not resolve symlink %s: %v\n", p, err)
 					return nil
 				}
 				info, err = os.Stat(resolvedPath)
 				if err != nil {
-					fmt.Printf(">> Warning: Could not stat resolved symlink %s: %v\n", p, err)
 					return nil
 				}
-				// If it's a directory symlink, we'd need a recursive walk here, 
-				// but for now we handle it as a file or empty dir to avoid loops.
 			}
 
 			// Calculate relative path from local base
@@ -139,11 +133,9 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 
 		dirCount := len(foldersToCreate)
 		if dirCount > 0 {
-			fmt.Printf(">> PFTE: Phase 1 - Creating %d directories...\n", dirCount)
 			dirChan := make(chan string, dirCount)
 			var wg sync.WaitGroup
 			var doneCount int32
-			var printMu sync.Mutex
 			for _, d := range foldersToCreate {
 				dirChan <- d
 			}
@@ -154,17 +146,17 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 				go func() {
 					defer wg.Done()
 					for dir := range dirChan {
-						_ = mainSession.SftpClient.MkdirAll(dir)
-						current := atomic.AddInt32(&doneCount, 1)
-						printMu.Lock()
-						progress := float64(current) / float64(dirCount) * 100
-						fmt.Printf("\r>> Structure: [%3.0f%%] Processed...                 ", progress)
-						printMu.Unlock()
+						select {
+						case <-ctx.Done():
+							return
+						default:
+							_ = mainSession.SftpClient.MkdirAll(dir)
+							atomic.AddInt32(&doneCount, 1)
+						}
 					}
 				}()
 			}
 			wg.Wait()
-			fmt.Println("\n>> PFTE: Structure verified.")
 		}
 
 		fileCount := int64(len(filesToTransfer))
@@ -172,32 +164,27 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 			return nil
 		}
 
-		fmt.Printf(">> PFTE: Phase 2 - Queuing %d files...\n", fileCount)
 		for _, job := range filesToTransfer {
 			e.Queue.Add(job)
 		}
 		GlobalMonitor.Reset(fileCount, totalBytes)
 
 		workerPool := NewWorkerPool(concurrency, e.Queue)
-		workerPool.StartUnleash(sessions)
+		workerPool.StartUnleash(ctx, sessions)
 		return nil
 
-		// --- DOWNLOAD LOGIC (Unchanged but using sourcePath) ---
+		// --- DOWNLOAD LOGIC ---
 	} else {
-		// Just mapping arguments: sourcePath is what we want to download
-		return e.startDownload(sessions, mainSession, concurrency, sourcePath)
+		return e.startDownload(ctx, sessions, mainSession, concurrency, sourcePath)
 	}
 }
 
 // Helper to keep the file clean
-func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *network.SftpSession, concurrency int, targetPath string) error {
+func (e *Engine) startDownload(ctx context.Context, sessions []*network.SftpSession, mainSession *network.SftpSession, concurrency int, targetPath string) error {
 	localBase := "dump"
 	if _, err := os.Stat(localBase); os.IsNotExist(err) {
 		os.Mkdir(localBase, 0755)
 	}
-
-	pwd, _ := mainSession.SftpClient.Getwd()
-	fmt.Printf(">> Remote PWD: %s\n", pwd)
 
 	targetName := path.Base(targetPath)
 	if targetPath == "" || targetPath == "." {
@@ -208,17 +195,11 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 		remoteSource = "."
 	}
 
-	fmt.Printf(">> PFTE: Verifying '%s'...\n", remoteSource)
-
-	var info os.FileInfo
-	var err error
-	info, err = mainSession.SftpClient.Stat(remoteSource) // Use Stat to follow symlink if the target itself is one
+	info, err := mainSession.SftpClient.Stat(remoteSource) // (We follow symlinks if the target is one)
 
 	if err != nil && targetName != "" {
-		fmt.Println(">> Status: Path not found. Initiating Deep Search (Depth: 3)...")
 		foundPath := findRemotePath(mainSession.SftpClient, ".", targetName, 3)
 		if foundPath != "" {
-			fmt.Printf(">> THE HOUND: Found '%s' at '%s'! Auto-correcting...\n", targetName, foundPath)
 			remoteSource = foundPath
 			info, err = mainSession.SftpClient.Stat(remoteSource)
 		} else {
@@ -232,10 +213,14 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 	queuedCount := int64(0)
 	totalBytes := int64(0)
 
-	fmt.Printf(">> PFTE: Scanning '%s' recursively...\n", remoteSource)
-
 	walker := mainSession.SftpClient.Walk(remoteSource)
 	for walker.Step() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if walker.Err() != nil {
 			continue
 		}
@@ -257,10 +242,8 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 		}
 
 		if stat.Mode()&os.ModeSymlink != 0 {
-			// If it's a symlink, we try to see what's on the other side
 			realStat, err := mainSession.SftpClient.Stat(remotePath)
 			if err != nil {
-				fmt.Printf(">> Warning: Remote broken symlink %s\n", remotePath)
 				continue
 			}
 			stat = realStat
@@ -280,14 +263,11 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 		totalBytes += stat.Size()
 	}
 
-	fmt.Printf(">> PFTE: Job ready. Files: %d, Total Size: %d bytes.\n", queuedCount, totalBytes)
 	GlobalMonitor.Reset(queuedCount, totalBytes)
 
 	if queuedCount > 0 {
 		workerPool := NewWorkerPool(concurrency, e.Queue)
-		workerPool.StartUnleash(sessions)
-	} else {
-		fmt.Println(">> Warning: Folder is empty.")
+		workerPool.StartUnleash(ctx, sessions)
 	}
 	return nil
 }
